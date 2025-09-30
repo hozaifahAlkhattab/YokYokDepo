@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Malzeme Konum Arama</title>
+  <style>
+    :root{--bg:#0f172a;--card:#111827;--muted:#334155;--text:#e5e7eb}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Noto Sans",Tahoma,Arial;background:var(--bg);color:var(--text)}
+    .container{max-width:980px;margin:24px auto;padding:16px}
+    .card{background:#111827;border-radius:16px;padding:20px;box-shadow:0 10px 25px rgba(0,0,0,.35)}
+    h1{margin:0 0 8px;font-size:clamp(20px,3vw,28px);display:flex;align-items:center;gap:10px}
+    .badge{display:inline-block;background:#0b1220;border:1px solid var(--muted);padding:4px 10px;border-radius:999px;font-size:13px}
+    .row{display:grid;grid-template-columns:1fr;gap:10px;margin-block:12px}
+    @media(min-width:800px){.row.two{grid-template-columns:2fr 1fr}}
+    input,button,select{width:100%;padding:10px 12px;border-radius:12px;border:1px solid var(--muted);background:#0b1220;color:var(--text);outline:none}
+    input:focus,select:focus{border-color:#60a5fa;box-shadow:0 0 0 3px rgba(96,165,250,.2)}
+    button{cursor:pointer;border:1px solid #14532d;background:linear-gradient(180deg,#16a34a,#15803d);font-weight:600}
+    button.ghost{background:#0b1220;border-color:var(--muted)}
+    .result{margin-top:12px;padding:12px;border-radius:12px;background:#0b1220;border:1px dashed var(--muted)}
+    .status{margin:8px 0;padding:8px;border-radius:8px;background:#0b1220;border:1px solid var(--muted);font-size:14px}
+    table{width:100%;border-collapse:collapse;margin-top:10px}
+    th,td{border-bottom:1px solid var(--muted);padding:10px;text-align:start}
+    .actions button{margin-inline:4px}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>
+        Malzeme Konum Arama
+        <span class="badge">Toplam: <span id="itemCount">0</span></span>
+      </h1>
+      <div id="status" class="status">🔧 Başlatılıyor...</div>
+      <div class="row two">
+        <div>
+          <label for="q">Malzeme adı</label>
+          <input list="names" id="q" placeholder="Malzeme adını yazın" autocomplete="off" />
+          <datalist id="names"></datalist>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="search" type="button">Ara</button>
+        </div>
+      </div>
+      <div id="result" class="result" hidden></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2 style="margin-top:0">Yeni Malzeme Ekle</h2>
+      <div class="row two">
+        <input id="newName" placeholder="Malzeme adı (ör. Süpürge)" />
+        <select id="newPlace">
+          <option value="">— Konum seç</option>
+        </select>
+      </div>
+      <div class="row">
+        <button id="addBtn" class="ghost" type="button">Ekle</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2 style="margin-top:0">Malzeme Sil</h2>
+      <div class="row two">
+        <input id="delName" list="names" placeholder="Silmek için malzeme adını yazın" />
+        <button id="delBtn" class="ghost" type="button" style="border-color:#7f1d1d">Sil</button>
+      </div>
+      <div class="status" id="delStatus" style="display:none"></div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const API_URL = 'https://script.google.com/macros/s/AKfycbyHG3OdwsqXB4YtIMvpPdekT9ai1bsPvGvuurOM9Z-_x2Wqiap_BrCH2RMd3Zqnzgzxzg/exec';
+  const TOKEN   = 'YokYok';
+
+  const status  = document.getElementById('status');
+  const countEl = document.getElementById('itemCount');
+  const namesDL = document.getElementById('names');
+  const resultBox = document.getElementById('result');
+
+  // الأماكن المسموحة: a..ğ × 1..4
+  const LOCATIONS = (() => {
+    const letters = ['a','b','c','ç','d','e','f','g','ğ'];
+    const nums    = [1,2,3,4];
+    const out = [];
+    for (const L of letters) for (const n of nums) out.push(L+String(n));
+    return out;
+  })();
+
+  // املأ select الخاص بالإضافة
+  const newPlaceSel = document.getElementById('newPlace');
+  LOCATIONS.forEach(v => {
+    const opt = document.createElement('option');
+    opt.value = v; opt.textContent = v.toUpperCase();
+    newPlaceSel.appendChild(opt);
+  });
+
+  function setStatus(msg, kind='info'){
+    status.textContent = msg;
+    status.style.borderColor = (kind==='err') ? '#ef4444' : '#334155';
+  }
+
+  function trNormalize(str){
+    if(!str) return '';
+    let s = String(str).toLocaleLowerCase('tr').trim();
+    s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    return s.replace(/\s+/g,' ');
+  }
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;", '"':"&quot;"}[c]));
+  }
+
+  let DATA = [];
+  let INDEX = new Map();
+
+  function rebuildIndex(){
+    INDEX = new Map();
+    namesDL.innerHTML = '';
+    const seen = new Set();
+    for(const row of DATA){
+      const key = trNormalize(row.ad);
+      if(!INDEX.has(key)) INDEX.set(key, []);
+      INDEX.get(key).push(row);
+      if(!seen.has(row.ad)){
+        const opt = document.createElement('option');
+        opt.value = row.ad;
+        namesDL.appendChild(opt);
+        seen.add(row.ad);
+      }
+    }
+    countEl.textContent = String(DATA.length);
+  }
+
+  function renderRows(rows){
+    if(!rows || !rows.length) return '<div>Kayıt bulunamadı.</div>';
+    let html = '<table><thead><tr><th>Malzeme</th><th>Konum</th><th>İşlem</th></tr></thead><tbody>';
+    for(const r of rows){
+      html += '<tr data-id="'+(r.id||'')+'">'+
+                '<td class="c-name">'+escapeHtml(r.ad)+'</td>'+
+                '<td class="c-place">'+escapeHtml(r.konum)+'</td>'+
+                '<td class="actions">'+
+                  '<button class="ghost btn-edit" type="button">Düzenle</button>'+
+                  '<button class="ghost btn-del" type="button" style="border-color:#7f1d1d">Sil</button>'+
+                '</td>'+
+              '</tr>';
+    }
+    html += '</tbody></table>';
+    return html;
+  }
+
+  // ------- API (form-urlencoded لتفادي CORS preflight) -------
+  async function apiGetList(){
+    const url = `${API_URL}?action=list&token=${encodeURIComponent(TOKEN)}`;
+    const res = await fetch(url, { method:'GET' });
+    const j = await res.json();
+    if(!j.ok) throw new Error(j.error||'list_failed');
+    return j.items;
+  }
+
+  async function postForm(payload){
+    const body = new URLSearchParams(payload);
+    const res = await fetch(API_URL, {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
+      body
+    });
+    return res.json();
+  }
+
+  async function apiAdd(ad, konum){
+    const j = await postForm({token:TOKEN, action:'add', ad, konum});
+    if(!j.ok) throw new Error(j.error||'add_failed');
+    return j.item;
+  }
+
+  async function apiUpdate(id, ad, konum){
+    const j = await postForm({token:TOKEN, action:'update', id:String(id), ad, konum});
+    if(!j.ok) throw new Error(j.error||'update_failed');
+    return true;
+  }
+
+  async function apiDeleteByName(name){
+    const j = await postForm({token:TOKEN, action:'deleteByName', name});
+    if(!j.ok) throw new Error(j.error||'delete_failed');
+    return j.removed||0;
+  }
+
+  async function apiDeleteById(id){
+    const j = await postForm({token:TOKEN, action:'deleteById', id:String(id)});
+    if(!j.ok) throw new Error(j.error||'delete_failed');
+    return true;
+  }
+  // -----------------------------------------------------------
+
+  async function loadData(){
+    try{
+      setStatus('⏬ Veri yükleniyor...');
+      DATA = await apiGetList();
+      rebuildIndex();
+      setStatus('✅ Hazır.');
+    }catch(e){
+      setStatus('❌ Sunucu hatası: '+e.message, 'err');
+    }
+  }
+
+  function search(){
+    const q = document.getElementById('q').value;
+    const key = trNormalize(q);
+    const rows = INDEX.get(key) || [];
+    resultBox.hidden = false;
+    resultBox.innerHTML = rows.length ? renderRows(rows) : '⚠️ "'+escapeHtml(q)+'" bulunamadı.';
+  }
+
+  async function addNew(){
+    const name  = document.getElementById('newName').value.trim();
+    let place   = document.getElementById('newPlace').value;
+    if(!name){ alert('Lütfen malzeme adını girin.'); return; }
+    if(place && !LOCATIONS.includes(place.toLocaleLowerCase('tr'))) { alert('Geçersiz konum. Lütfen listeden seçin.'); return; }
+    place = place ? place.toUpperCase('tr') : '—';
+    try{ const item = await apiAdd(name, place); DATA.push(item); rebuildIndex(); document.getElementById('newName').value=''; document.getElementById('newPlace').value=''; document.getElementById('q').value = name; search(); }
+    catch(e){ setStatus('❌ Ekleme hatası: '+e.message, 'err'); }
+  }
+
+  function makeEditable(tr){
+    const name  = tr.querySelector('.c-name').textContent;
+    const place = tr.querySelector('.c-place').textContent.toLocaleLowerCase('tr');
+    const options = LOCATIONS.map(v => `<option value="${v}" ${v===place?'selected':''}>${v.toUpperCase()}</option>`).join('');
+    tr.innerHTML = '<td colspan="3">'+
+      '<div class="row two">'+
+      `<input class="edit-name" value="${name.replace(/"/g,'&quot;')}" />`+
+      `<select class="edit-place"><option value="">— Konum seç</option>${options}</select>`+
+      '</div>'+
+      '<div class="row two">'+
+      '<button class="ghost btn-save" type="button">Kaydet</button>'+
+      '<button class="ghost btn-cancel" type="button">İptal</button>'+
+      '</div>'+
+    '</td>';
+    tr.setAttribute('data-editing','1');
+  }
+
+  async function saveEdit(tr){
+    const id = Number(tr.getAttribute('data-id')) || 0;
+    const newName  = tr.querySelector('.edit-name').value.trim();
+    const selVal   = tr.querySelector('.edit-place').value;
+    const newPlace = selVal ? selVal.toUpperCase('tr') : '—';
+    try{
+      if(id) { await apiUpdate(id, newName, newPlace); }
+      else   { await apiDeleteByName((tr.querySelector('.c-name')?.textContent||'').toLocaleLowerCase('tr')); await apiAdd(newName||'', newPlace); }
+      const row = DATA.find(r=>r.id===id);
+      if(row){ row.ad = newName || row.ad; row.konum = newPlace; }
+      rebuildIndex();
+      const rows = INDEX.get(trNormalize(newName || (DATA.find(r=>r.id===id)||{}).ad || '')) || [];
+      resultBox.innerHTML = renderRows(rows);
+    }catch(err){ setStatus('❌ Güncelleme hatası: '+err.message, 'err'); }
+  }
+
+  async function deleteRow(tr){
+    const idAttr = tr.getAttribute('data-id');
+    const id = Number(idAttr)||0;
+    const name = tr.querySelector('.c-name').textContent;
+    try{
+      if(id) { await apiDeleteById(id); }
+      else   { await apiDeleteByName(name.toLocaleLowerCase('tr')); }
+      DATA = id ? DATA.filter(r=>r.id!==id) : DATA.filter(r=>trNormalize(r.ad)!==trNormalize(name));
+      rebuildIndex();
+      search();
+    }catch(err){ setStatus('❌ Silme hatası: '+err.message, 'err'); }
+  }
+
+  async function deleteByName(){
+    const name = document.getElementById('delName').value.trim();
+    if(!name){ alert('Lütfen silinecek adı yazın.'); return; }
+    try{
+      const removed = await apiDeleteByName(name.toLocaleLowerCase('tr'));
+      if(removed){ DATA = DATA.filter(r => trNormalize(r.ad) !== trNormalize(name)); rebuildIndex(); resultBox.innerHTML=''; }
+      const info = document.getElementById('delStatus');
+      info.style.display='block'; info.textContent = removed ? ('🗑️ '+removed+' kayıt silindi.') : 'Silinecek kayıt bulunamadı.';
+    }catch(e){ setStatus('❌ Silme hatası: '+e.message, 'err'); }
+  }
+
+  document.getElementById('search').addEventListener('click', search);
+  document.getElementById('q').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); search(); } });
+  document.getElementById('q').addEventListener('input', e=>{ const key = trNormalize(e.target.value); if(INDEX.has(key)) search(); });
+  document.getElementById('addBtn').addEventListener('click', addNew);
+  document.getElementById('delBtn').addEventListener('click', deleteByName);
+
+  // Robust delegation: use closest()
+  resultBox.addEventListener('click', e=>{
+    const tr = e.target.closest('tr');
+    if(!tr) return;
+    if (e.target.closest('.btn-edit')) makeEditable(tr);
+    else if (e.target.closest('.btn-save')) saveEdit(tr);
+    else if (e.target.closest('.btn-cancel')) search();
+    else if (e.target.closest('.btn-del')) { if(confirm('Kaydı silmek istiyor musunuz?')) deleteRow(tr); }
+  });
+
+  loadData();
+})();
+</script>
+</body>
+</html>
